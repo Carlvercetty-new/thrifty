@@ -106,6 +106,7 @@ class Constant private constructor (
         private val ENUM = EnumValidator
         private val COLLECTION = CollectionValidator
         private val MAP = MapValidator
+        private val STRUCT = StructValidator
 
         internal fun forType(type: ThriftType): ConstValueValidator {
             val tt = type.trueType
@@ -140,6 +141,10 @@ class Constant private constructor (
 
             if (tt.isMap) {
                 return MAP
+            }
+
+            if (tt.isStruct) {
+                return STRUCT
             }
 
             throw IllegalStateException("Struct-valued constants are not yet implemented")
@@ -374,6 +379,24 @@ class Constant private constructor (
                 }
 
                 else -> throw IllegalStateException("Expected a map literal, got: $valueElement")
+            }
+        }
+    }
+
+    private object StructValidator : ConstValueValidator {
+        override fun validate(symbolTable: SymbolTable, expected: ThriftType, valueElement: ConstValueElement) {
+            if (expected !is StructType) {
+                throw IllegalStateException("bad enum literal")
+            }
+
+            when (valueElement) {
+                is MapValueElement -> {
+                    if (valueElement.thriftText == "{}") return
+
+                    throw IllegalStateException("bad struct literal: $valueElement")
+                }
+
+                else -> throw IllegalStateException("bad struct literal: $valueElement")
             }
         }
     }

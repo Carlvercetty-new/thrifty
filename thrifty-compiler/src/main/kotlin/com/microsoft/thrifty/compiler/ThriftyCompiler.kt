@@ -210,9 +210,15 @@ class ThriftyCompiler {
                     }
                 }
 
+        // TODO : Parcelable/Serializable as an enum
         val emitParcelable: Boolean by option("--parcelable",
                     help = "When set, generates Parcelable implementations for structs")
                 .flag(default = false)
+
+        val emitSerializable: Boolean by option("--serializable",
+                help = "When set, generates Serializable implementations for structs")
+                .flag(default = false)
+        ////
 
         val omitServiceClients: Boolean by option("--omit-service-clients",
                     help = "When set, don't generate service clients")
@@ -263,13 +269,23 @@ class ThriftyCompiler {
                     help = "When set, unknown values found when decoding will throw an exception. Otherwise, it uses null/default values.")
                 .flag("--no-fail-on-unknown-enum-values", default = true)
 
+        val ignoreUserDir by option("--ignore-user-dir",
+                help = "Tells the compiler to ignore its location while looking for thrift files")
+                .flag("--no-ignore-user-dir", default = false)
+
+        val useDataClass by option("--use-data-class",
+                help = "Tells the compiler to generate data classes; if false, properties will be set as fields")
+                .flag("--no-data-class", default = true)
+
         override fun run() {
             val loader = Loader()
             for (thriftFile in thriftFiles) {
                 loader.addThriftFile(thriftFile)
             }
 
-            loader.addIncludePath(Paths.get(System.getProperty("user.dir")))
+            if (!ignoreUserDir) {
+                loader.addIncludePath(Paths.get(System.getProperty("user.dir")))
+            }
             for (dir in searchPath) {
                 loader.addIncludePath(dir)
             }
@@ -333,6 +349,7 @@ class ThriftyCompiler {
             gen.nullabilityAnnotationType(nullabilityAnnotationType)
             gen.emitFileComment(!omitFileComments)
             gen.emitParcelable(emitParcelable)
+            gen.emitSerializable(emitSerializable)
             gen.failOnUnknownEnumValues(failOnUnknownEnumValues)
 
             gen.generate(outputDirectory)
@@ -347,6 +364,10 @@ class ThriftyCompiler {
 
             if (emitParcelable) {
                 gen.parcelize()
+            }
+
+            if (emitSerializable) {
+                gen.serialize()
             }
 
             if (omitServiceClients) {
@@ -368,6 +389,8 @@ class ThriftyCompiler {
             if (kotlinBigEnums) {
                 gen.emitBigEnums()
             }
+
+            gen.useDataClass(useDataClass)
 
             if (kotlinFilePerType) {
                 gen.filePerType()

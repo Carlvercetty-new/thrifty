@@ -31,7 +31,7 @@ import com.microsoft.thrifty.schema.Location
  */
 sealed class ConstValueElement {
     abstract val location: Location
-    abstract val thriftText: String
+    abstract var thriftText: String
 }
 
 /**
@@ -41,7 +41,7 @@ sealed class ConstValueElement {
  */
 data class IntValueElement(
         override val location: Location,
-        override val thriftText: String,
+        override var thriftText: String,
         val value: Long
 ) : ConstValueElement() {
     /** @inheritdoc */
@@ -55,7 +55,7 @@ data class IntValueElement(
  */
 data class DoubleValueElement(
         override val location: Location,
-        override val thriftText: String,
+        override var thriftText: String,
         val value: Double
 ) : ConstValueElement() {
     /** @inheritdoc */
@@ -69,7 +69,7 @@ data class DoubleValueElement(
  */
 data class LiteralValueElement(
         override val location: Location,
-        override val thriftText: String,
+        override var thriftText: String,
         val value: String
 ) : ConstValueElement() {
     /** @inheritdoc */
@@ -83,7 +83,7 @@ data class LiteralValueElement(
  */
 data class IdentifierValueElement(
         override val location: Location,
-        override val thriftText: String,
+        override var thriftText: String,
         val value: String
 ) : ConstValueElement() {
     /** @inheritdoc */
@@ -97,7 +97,7 @@ data class IdentifierValueElement(
  */
 data class ListValueElement(
         override val location: Location,
-        override val thriftText: String,
+        override var thriftText: String,
         val value: List<ConstValueElement>
 ) : ConstValueElement() {
     /** @inheritdoc */
@@ -111,7 +111,7 @@ data class ListValueElement(
  */
 data class MapValueElement(
         override val location: Location,
-        override val thriftText: String,
+        override var thriftText: String,
         val value: Map<ConstValueElement, ConstValueElement>
 ) : ConstValueElement() {
     /** @inheritdoc */

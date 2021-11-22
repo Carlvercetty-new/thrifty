@@ -32,7 +32,7 @@ class Field private constructor(
         private val mixin: UserElementMixin,
         private var type_: ThriftType? = null
 ) : UserElement by mixin {
-
+    // TODO : isMutable to select between var/val
     /**
      * True if this field should be redacted when printed as a string.
      */
@@ -74,8 +74,9 @@ class Field private constructor(
     /**
      * True if this field is explicitly marked `required`, otherwise false.
      */
-    val required: Boolean
+    var required: Boolean = false
         get() = element.requiredness === Requiredness.REQUIRED
+        private set
 
     /**
      * The field's default value, if any.
@@ -111,6 +112,7 @@ class Field private constructor(
         if (value != null) {
             try {
                 Constant.validate(linker, value, type_!!)
+                // TODO : if default value set for struct, then struct is required
             } catch (e: IllegalStateException) {
                 linker.addError(value.location, e.message ?: "Error validating default field value")
             }

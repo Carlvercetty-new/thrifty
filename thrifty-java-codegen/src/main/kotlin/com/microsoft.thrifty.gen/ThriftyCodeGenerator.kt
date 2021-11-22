@@ -70,6 +70,7 @@ class ThriftyCodeGenerator {
     private var typeProcessor: TypeProcessor? = null
     private var nullabilityAnnotationType: NullabilityAnnotationType = NullabilityAnnotationType.NONE
     private var emitParcelable: Boolean = false
+    private var emitSerialzable: Boolean = false
     private var emitFileComment = true
     private var failOnUnknownEnumValues = true
 
@@ -108,6 +109,11 @@ class ThriftyCodeGenerator {
 
     fun emitParcelable(emitParcelable: Boolean): ThriftyCodeGenerator {
         this.emitParcelable = emitParcelable
+        return this
+    }
+
+    fun emitSerializable(emitSerialzable: Boolean): ThriftyCodeGenerator {
+        this.emitSerialzable = emitSerialzable
         return this
     }
 

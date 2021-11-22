@@ -55,6 +55,10 @@ internal class Linker(
     private var linking = false
     private var linked = false
 
+    companion object {
+        private const val THRIFT_EXTENSION = ".thrift"
+    }
+
     fun link() {
         if (!Thread.holdsLock(environment)) {
             throw AssertionError("Linking must be locked on the environment!")
@@ -114,8 +118,8 @@ internal class Linker(
 
             val included = File(p.location.base, p.location.path)
             val name = included.name
-            val ix = name.indexOf('.')
-            if (ix == -1) {
+            val ix = name.lastIndexOf('.')
+            if (ix == -1 || name.substring(ix) != THRIFT_EXTENSION) {
                 throw AssertionError(
                         "No extension found for included file " + included.absolutePath + ", "
                                 + "invalid include statement")
@@ -431,7 +435,7 @@ internal class Linker(
             if (ix != -1) {
                 val includeName = symbol.substring(0, ix)
                 val qualifiedName = symbol.substring(ix + 1)
-                val expectedPath = "$includeName.thrift"
+                val expectedPath = "$includeName$THRIFT_EXTENSION"
                 constant = program.includes
                         .filter { p -> p.location.path == expectedPath }
                         .mapNotNull { p -> p.constantMap[qualifiedName] }

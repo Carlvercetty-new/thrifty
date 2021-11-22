@@ -92,6 +92,7 @@ import com.squareup.kotlinpoet.jvm.jvmField
 import com.squareup.kotlinpoet.jvm.jvmStatic
 import com.squareup.kotlinpoet.tag
 import okio.ByteString
+import java.io.Serializable
 
 private object Tags {
     val ADAPTER = "RESERVED:ADAPTER"
@@ -141,6 +142,7 @@ class KotlinCodeGenerator(
     private var shouldImplementStruct: Boolean = true
 
     private var parcelize: Boolean = false
+    private var serialize: Boolean = false
     private var builderlessDataClasses: Boolean = true
     private var builderRequiredConstructor: Boolean = false
     private var omitServiceClients: Boolean = false
@@ -150,6 +152,7 @@ class KotlinCodeGenerator(
     private var emitBigEnums: Boolean = false
     private var failOnUnknownEnumValues: Boolean = true
     private var generateServer: Boolean = false
+    private var useDataClass: Boolean = false
 
     private var listClassName: ClassName? = null
     private var setClassName: ClassName? = null
@@ -226,6 +229,7 @@ class KotlinCodeGenerator(
     fun filePerNamespace(): KotlinCodeGenerator = apply { outputStyle = OutputStyle.FILE_PER_NAMESPACE }
     fun filePerType(): KotlinCodeGenerator = apply { outputStyle = OutputStyle.FILE_PER_TYPE }
     fun parcelize(): KotlinCodeGenerator = apply { parcelize = true }
+    fun serialize(): KotlinCodeGenerator = apply { serialize = true }
 
     fun listClassName(name: String): KotlinCodeGenerator = apply {
         this.listClassName = ClassName.bestGuess(name)
@@ -273,6 +277,10 @@ class KotlinCodeGenerator(
 
     fun failOnUnknownEnumValues(value: Boolean = true): KotlinCodeGenerator = apply {
         this.failOnUnknownEnumValues = value
+    }
+
+    fun useDataClass(value: Boolean = true): KotlinCodeGenerator = apply {
+        this.useDataClass = value
     }
 
     private object NoTypeProcessor : KotlinTypeProcessor {
@@ -501,7 +509,7 @@ class KotlinCodeGenerator(
     internal fun generateDataClass(schema: Schema, struct: StructType): TypeSpec {
         val structClassName = ClassName(struct.kotlinNamespace, struct.name)
         val typeBuilder = TypeSpec.classBuilder(structClassName).apply {
-            if (struct.fields.isNotEmpty()) {
+            if (useDataClass && struct.fields.isNotEmpty()) {
                 addModifiers(KModifier.DATA)
             }
 
@@ -538,19 +546,33 @@ class KotlinCodeGenerator(
             val param = ParameterSpec
                 .builder(fieldName, typeName)
 
-            field.defaultValue?.let {
-                param.defaultValue(renderConstValue(schema, field.type, it))
+            val defaultValue = field.defaultValue?.let {
+                renderConstValue(schema, field.type, it)
+            }
+
+            defaultValue?.let {
+                param.defaultValue(it)
             }
 
             val prop = PropertySpec.builder(fieldName, typeName)
-                    .initializer(fieldName)
-                    .jvmField()
+                    // TODO : Flag
+                    // .jvmField()
                     .addAnnotation(thriftField)
+
+            // If class is not a data class, fields must be mutable,
+            if (!useDataClass) {
+                prop.mutable()
+                if (defaultValue != null) prop.initializer(defaultValue) else prop.initializer("null")
+            } else {
+                prop.initializer(fieldName)
+            }
 
             if (field.isObfuscated) prop.addAnnotation(Obfuscated::class)
             if (field.isRedacted) prop.addAnnotation(Redacted::class)
 
-            ctorBuilder.addParameter(param.build())
+            if (useDataClass) {
+                ctorBuilder.addParameter(param.build())
+            }
             typeBuilder.addProperty(prop.build())
         }
 
@@ -602,13 +624,17 @@ class KotlinCodeGenerator(
         }
 
         if (shouldImplementStruct) {
-            typeBuilder
-                    .addSuperinterface(Struct::class)
-                    .addFunction(FunSpec.builder("write")
-                            .addModifiers(KModifier.OVERRIDE)
-                            .addParameter("protocol", Protocol::class)
-                            .addStatement("%L.write(protocol, this)", nameAllocator.get(Tags.ADAPTER))
-                            .build())
+            typeBuilder.addSuperinterface(Struct::class)
+
+            if (serialize) {
+                typeBuilder.addSuperinterface(Serializable::class)
+            }
+
+            typeBuilder.addFunction(FunSpec.builder("write")
+                    .addModifiers(KModifier.OVERRIDE)
+                    .addParameter("protocol", Protocol::class)
+                    .addStatement("%L.write(protocol, this)", nameAllocator.get(Tags.ADAPTER))
+                    .build())
         }
 
         return typeBuilder
@@ -1123,10 +1149,10 @@ class KotlinCodeGenerator(
             reader.addStatement("return builder.build()")
         } else {
             val block = CodeBlock.builder()
-            block.add("«return %T(", struct.typeName)
+            block.add("«return %T(${if (useDataClass) "" else ").apply·{"}", struct.typeName)
 
             val hasRequiredField = struct.fields.any { it.required }
-            val newlinePerParam = (hasRequiredField && struct.fields.size > 1) || struct.fields.size > 2
+            val newlinePerParam = !useDataClass || (hasRequiredField && struct.fields.size > 1) || struct.fields.size > 2
             val separator = if (newlinePerParam) System.lineSeparator() else "·"
 
             if (newlinePerParam) {
@@ -1135,10 +1161,10 @@ class KotlinCodeGenerator(
 
             for ((ix, field) in struct.fields.withIndex()) {
                 if (ix > 0) {
-                    block.add(",$separator")
+                    block.add("${if (useDataClass) "," else ""}$separator")
                 }
 
-                block.add("%N = ", nameAllocator.get(field))
+                block.add("${if (useDataClass) "" else "this."}%N = ", nameAllocator.get(field))
                 if (field.required) {
                     block.add("checkNotNull(%N)·{·%S·}",
                             localFieldName(field),
@@ -1148,7 +1174,8 @@ class KotlinCodeGenerator(
                 }
             }
 
-            block.add(")»%L", System.lineSeparator())
+            block.add(System.lineSeparator())
+            block.add(if (useDataClass)  { ")»%L" } else "}»%L", System.lineSeparator())
 
             reader.addCode(block.build())
         }
@@ -1310,63 +1337,66 @@ class KotlinCodeGenerator(
     }
 
     private fun generateWriteCall(writer: FunSpec.Builder, name: String, type: ThriftType) {
-
         // Assumptions:
         // - writer has a parameter "protocol" that is a Protocol
 
-        fun generateRecursiveWrite(source: String, type: ThriftType, scope: Int) {
+        fun generateRecursiveWrite(source: String, type: ThriftType, scope: Int, forceUnwrap: Boolean = false) {
+            val unwrapFormat = "!!"
+            val fieldFormat = "%L" + if (forceUnwrap) unwrapFormat else ""
+
             type.accept(object : ThriftType.Visitor<Unit> {
                 override fun visitVoid(voidType: BuiltinType) {
                     error("Cannot write void, wat r u doing")
                 }
 
                 override fun visitBool(boolType: BuiltinType) {
-                    writer.addStatement("%N.writeBool(%L)", "protocol", source)
+
+                    writer.addStatement("%N.writeBool($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitByte(byteType: BuiltinType) {
-                    writer.addStatement("%N.writeByte(%L)", "protocol", source)
+                    writer.addStatement("%N.writeByte($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitI16(i16Type: BuiltinType) {
-                    writer.addStatement("%N.writeI16(%L)", "protocol", source)
+                    writer.addStatement("%N.writeI16($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitI32(i32Type: BuiltinType) {
-                    writer.addStatement("%N.writeI32(%L)", "protocol", source)
+                    writer.addStatement("%N.writeI32($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitI64(i64Type: BuiltinType) {
-                    writer.addStatement("%N.writeI64(%L)", "protocol", source)
+                    writer.addStatement("%N.writeI64($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitDouble(doubleType: BuiltinType) {
-                    writer.addStatement("%N.writeDouble(%L)", "protocol", source)
+                    writer.addStatement("%N.writeDouble($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitString(stringType: BuiltinType) {
-                    writer.addStatement("%N.writeString(%L)", "protocol", source)
+                    writer.addStatement("%N.writeString($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitBinary(binaryType: BuiltinType) {
-                    writer.addStatement("%N.writeBinary(%L)", "protocol", source)
+                    writer.addStatement("%N.writeBinary($fieldFormat)", "protocol", source)
                 }
 
                 override fun visitEnum(enumType: EnumType) {
-                    writer.addStatement("%N.writeI32(%L.value)", "protocol", source)
+                    writer.addStatement("%N.writeI32($fieldFormat.value)", "protocol", source)
                 }
 
                 override fun visitList(listType: ListType) {
                     val elementType = listType.elementType
                     writer.addStatement(
-                            "%N.writeListBegin(%T.%L, %L.size)",
+                            "%N.writeListBegin(%T.%L, $fieldFormat.size)",
                             "protocol",
                             TType::class,
                             elementType.typeCodeName,
                             source)
 
                     val iterator = "item$scope"
-                    writer.beginControlFlow("for ($iterator in %L)", source)
+                    writer.beginControlFlow("for ($iterator in $fieldFormat)", source)
 
                     generateRecursiveWrite(iterator, elementType, scope + 1)
 
@@ -1378,14 +1408,14 @@ class KotlinCodeGenerator(
                 override fun visitSet(setType: SetType) {
                     val elementType = setType.elementType
                     writer.addStatement(
-                            "%N.writeSetBegin(%T.%L, %L.size)",
+                            "%N.writeSetBegin(%T.%L, $fieldFormat.size)",
                             "protocol",
                             TType::class,
                             elementType.typeCodeName,
                             source)
 
                     val iterator = "item$scope"
-                    writer.beginControlFlow("for ($iterator in %L)", source)
+                    writer.beginControlFlow("for ($iterator in $fieldFormat)", source)
 
                     generateRecursiveWrite(iterator, elementType, scope + 1)
 
@@ -1408,7 +1438,7 @@ class KotlinCodeGenerator(
 
                     val keyIter = "key$scope"
                     val valIter = "val$scope"
-                    writer.beginControlFlow("for (($keyIter, $valIter) in %L)", source)
+                    writer.beginControlFlow("for (($keyIter, $valIter) in $fieldFormat)", source)
 
                     generateRecursiveWrite(keyIter, keyType, scope + 1)
                     generateRecursiveWrite(valIter, valType, scope + 1)
@@ -1419,7 +1449,7 @@ class KotlinCodeGenerator(
                 }
 
                 override fun visitStruct(structType: StructType) {
-                    writer.addStatement("%T.ADAPTER.write(%N, %L)", structType.typeName, "protocol", source)
+                    writer.addStatement("%T.ADAPTER.write(%N, $fieldFormat)", structType.typeName, "protocol", source)
                 }
 
                 override fun visitTypedef(typedefType: TypedefType) {
@@ -1432,7 +1462,7 @@ class KotlinCodeGenerator(
             })
         }
 
-        generateRecursiveWrite(name, type, 0)
+        generateRecursiveWrite(name, type, 0, !useDataClass)
     }
 
     private fun generateReadCall(
@@ -1863,8 +1893,129 @@ class KotlinCodeGenerator(
                     block.add("⇤}")
                 }
 
+                /* TODO; for now, dummy implementation that invokes default constructor and doesn't remove nullable type
+                private fun buildStruct(type: StructType): TypeSpec {
+                    val packageName = type.getNamespaceFor(NamespaceScope.JAVA)
+                    val structTypeName = ClassName.get(packageName, type.name)
+                    val builderTypeName = structTypeName.nestedClass("Builder")
+
+                    val structBuilder = TypeSpec.classBuilder(type.name)
+                            .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                            .addSuperinterface(Struct::class.java)
+
+                    if (type.hasJavadoc) {
+                        structBuilder.addJavadoc("\$L", type.documentation)
+                    }
+
+                    if (type.isException) {
+                        structBuilder.superclass(java.lang.Exception::class.java)
+                    }
+
+                    if (type.isDeprecated) {
+                        structBuilder.addAnnotation(AnnotationSpec.builder(TypeNames.DEPRECATED).build())
+                    }
+
+                    val builderSpec = builderFor(type, structTypeName, builderTypeName)
+                    val adapterSpec = adapterFor(type, structTypeName, builderTypeName)
+
+                    if (emitParcelable) {
+                        generateParcelable(type, structTypeName, structBuilder)
+                    }
+
+                    structBuilder.addType(builderSpec)
+                    structBuilder.addType(adapterSpec)
+                    structBuilder.addField(FieldSpec.builder(adapterSpec.superinterfaces[0], ADAPTER_FIELDNAME)
+                            .addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                            .initializer("new \$N()", adapterSpec)
+                            .build())
+
+                    val ctor = MethodSpec.constructorBuilder()
+                            .addModifiers(Modifier.PRIVATE)
+                            .addParameter(builderTypeName, "builder")
+
+                    val isUnion = type.isUnion
+                    for (field in type.fields) {
+
+                        val name = fieldNamer.getName(field)
+                        val fieldType = field.type
+                        val trueType = fieldType.trueType
+                        val fieldTypeName = typeResolver.getJavaClass(trueType)
+
+                        // Define field
+                        var fieldBuilder: FieldSpec.Builder = FieldSpec.builder(fieldTypeName, name)
+                                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                                .addAnnotation(fieldAnnotation(field))
+
+                        if (nullabilityAnnotationType != NullabilityAnnotationType.NONE) {
+                            val nullability = when {
+                                isUnion        -> nullabilityAnnotationType.nullableClassName
+                                field.required -> nullabilityAnnotationType.notNullClassName
+                                else           -> nullabilityAnnotationType.nullableClassName
+                            }
+                            fieldBuilder.addAnnotation(nullability)
+                        }
+
+                        if (field.hasJavadoc) {
+                            fieldBuilder = fieldBuilder.addJavadoc("\$L", field.documentation)
+                        }
+
+                        if (field.isRedacted) {
+                            fieldBuilder = fieldBuilder.addAnnotation(AnnotationSpec.builder(TypeNames.REDACTED).build())
+                        }
+
+                        if (field.isObfuscated) {
+                            fieldBuilder = fieldBuilder.addAnnotation(AnnotationSpec.builder(TypeNames.OBFUSCATED).build())
+                        }
+
+                        if (field.isDeprecated) {
+                            fieldBuilder = fieldBuilder.addAnnotation(AnnotationSpec.builder(TypeNames.DEPRECATED).build())
+                        }
+
+                        structBuilder.addField(fieldBuilder.build())
+
+                        // Update the struct ctor
+
+                        val assignment = CodeBlock.builder().add("$[this.\$N = ", name)
+
+                        when {
+                            trueType.isList -> {
+                                if (!field.required) {
+                                    assignment.add("builder.\$N == null ? null : ", name)
+                                }
+                                assignment.add("\$T.unmodifiableList(builder.\$N)",
+                                        TypeNames.COLLECTIONS, name)
+                            }
+                            trueType.isSet -> {
+                                if (!field.required) {
+                                    assignment.add("builder.\$N == null ? null : ", name)
+                                }
+                                assignment.add("\$T.unmodifiableSet(builder.\$N)",
+                                        TypeNames.COLLECTIONS, name)
+                            }
+                            trueType.isMap -> {
+                                if (!field.required) {
+                                    assignment.add("builder.\$N == null ? null : ", name)
+                                }
+                                assignment.add("\$T.unmodifiableMap(builder.\$N)",
+                                        TypeNames.COLLECTIONS, name)
+                            }
+                            else -> assignment.add("builder.\$N", name)
+                        }
+
+                        ctor.addCode(assignment.add(";\n$]").build())
+                    }
+
+                    structBuilder.addMethod(ctor.build())
+                    structBuilder.addMethod(buildEqualsFor(type))
+                    structBuilder.addMethod(buildHashCodeFor(type))
+                    structBuilder.addMethod(buildToStringFor(type))
+                    structBuilder.addMethod(buildWrite())
+
+                    return structBuilder.build()
+                }
+                 */
                 override fun visitStruct(structType: StructType) {
-                    TODO("not implemented")
+                    block.add("${structType.name}()")
                 }
 
                 override fun visitTypedef(typedefType: TypedefType) {
